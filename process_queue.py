@@ -205,15 +205,16 @@ def extract_facts_with_llm(conversation: str, existing_notes: str) -> list:
 
     client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
 
-    prompt = f"""Tu es un agent d'extraction de mémoire pour une base de connaissance personnelle.
+    prompt = f"""Tu es un agent de mémoire personnelle.
 
 Extrais 0-5 faits atomiques DURABLES depuis cette session Claude Code.
 
 RÈGLES STRICTES :
-- Capture : décisions méthodologiques, résultats d'analyse, patterns découverts, problèmes résolus, insights conceptuels
-- Ignore : débogage temporaire, échanges de coordination, reformulations sans contenu nouveau
+- Capture TOUT ce qui est durable : décisions techniques, configs système, solutions à des problèmes, préférences découvertes, workflows établis, insights sur n'importe quel projet, faits appris, outils configurés
+- Le domaine importe peu : recherche, infra, cours, scripts, lecture, etc.
+- Ignore : débogage temporaire sans résolution, bavardage, reformulations sans contenu nouveau, étapes intermédiaires
 - Titre = proposition testable ("X fait Y" — pas un label générique)
-- Maximum 5 notes. Zéro si rien de durable.
+- Maximum 5 notes. Zéro si vraiment rien de durable.
 
 TYPES DE RELATION :
 - NEW : fait entièrement nouveau, absent des notes existantes
