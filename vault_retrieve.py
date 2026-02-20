@@ -101,12 +101,13 @@ def main():
         )
         query_emb = resp.embeddings.float_[0]
 
-        results = qd.search(
+        response = qd.query_points(
             collection_name=COLLECTION,
-            query_vector=query_emb,
+            query=query_emb,
             limit=RETRIEVE_TOP_K,
             score_threshold=RETRIEVE_SCORE_THRESHOLD,
         )
+        results = response.points
 
         if not results:
             sys.exit(0)

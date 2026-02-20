@@ -109,14 +109,14 @@ def check_semantic_dup(content: str) -> tuple[bool, str]:
             input_type="search_query",
             embedding_types=["float"],
         )
-        results = qd.search(
+        qd_resp = qd.query_points(
             collection_name=COLLECTION,
-            query_vector=resp.embeddings.float_[0],
+            query=resp.embeddings.float_[0],
             limit=1,
             score_threshold=DEDUP_THRESHOLD,
         )
-        if results:
-            return True, results[0].payload.get("note_id", "")
+        if qd_resp.points:
+            return True, qd_resp.points[0].payload.get("note_id", "")
     except Exception as e:
         log(f"DEDUP error: {e}")
     return False, ""
