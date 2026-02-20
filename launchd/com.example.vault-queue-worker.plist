@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Remplacer com.example.vault-queue-worker par votre identifier -->
+    <key>Label</key>
+    <string>com.example.vault-queue-worker</string>
+
+    <!-- Remplacer /path/to/hooks par votre dossier hooks -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/path/to/hooks/process_queue.py</string>
+    </array>
+
+    <!-- Déclenché dès qu'un fichier apparaît dans le dossier queue/ -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/path/to/hooks/queue</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Logs (optionnel) -->
+    <key>StandardOutPath</key>
+    <string>/tmp/vault-queue-worker.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/vault-queue-worker.err</string>
+</dict>
+</plist>
