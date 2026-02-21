@@ -9,17 +9,17 @@ Persistent semantic memory for [Claude Code](https://claude.ai/claude-code). Eve
 ```
 On every message
   UserPromptSubmit → vault_retrieve.py
-    embed(message) via Voyage AI API
-    HNSW search in local Qdrant → top-K notes (score > threshold)
+    hybrid search: BM25 keyword + vector (Reciprocal Rank Fusion)
+    reranking via Voyage AI rerank-2 (optional)
     graph traversal:
       load vault_graph_cache.json  (pre-built by vault_embed.py, ~0.5ms)
       inject backlinks of primary notes  (notes that link TO them)
-      BFS depth 1: outbound links of primary notes  (round-robin)
-      BFS depth 2: outbound links of depth-1 nodes
-      score all candidates via Qdrant filter query (cosine similarity)
+      BFS depth 1+2: outbound links scored via Qdrant cosine similarity
+    temporal decay: notes accessed recently rank higher (Ebbinghaus-inspired)
+    confidence boost: confirmed notes score higher than experimental
     inject primary + connected notes into Claude context
 
-During session  (v3 — proactive memory)
+During session  (proactive memory)
   Claude detects a durable fact
     vault_add_note(note_id, content)     # write note to vault via MCP
     vault_embed.py --note {note_id}      # index immediately in Qdrant
@@ -27,16 +27,21 @@ During session  (v3 — proactive memory)
 
 End of session  (safety net)
   Stop hook → enqueue.py  (< 100ms, non-blocking)
+    re-enqueue if session grew by MIN_NEW_TURNS since last processing
 
 Background worker  (launchd WatchPaths)
   process_queue.py
-    parse session transcript
-    LLM extraction → 0-15 atomic facts  (v5: enforced slug links + Topics: section)
+    extract LAST N turns (not first — avoids reading session-start summary)
+    strip Claude Code UI tags (<system-reminder> etc.) from transcript
+    pre-query vault before LLM (reduces duplicate extractions)
+    LLM extraction → 0-15 atomic facts  (system message enforces JSON-only)
+    _repair_json_newlines()  →  fix unescaped newlines in JSON strings
     sanitize_note_id()  →  guarantee valid kebab-case filename
     fix_wikilinks_in_content()  →  replace [[Full Title]] with [[note-id]] slugs
     semantic dedup via Qdrant (score > 0.85 → EXTENDS existing note)
-    write markdown notes to notes/ directory
-    incremental upsert into Qdrant
+    atomic write (temp file + rename — no corruption on crash)
+    incremental upsert into Qdrant + update graph cache
+    archive ticket with updated turn_count for accurate future re-enqueue
 ```
 
 ---
@@ -46,6 +51,8 @@ Background worker  (launchd WatchPaths)
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
 | Embeddings | Voyage AI `voyage-4-large` | #1 on MTEB multilingual retrieval (76.90), 22 languages |
+| Keyword search | BM25 (rank-bm25) | Hybrid search via Reciprocal Rank Fusion |
+| Reranking | Voyage AI `rerank-2` | Precision boost after RRF fusion (~100ms) |
 | Vector store | Qdrant local mode | No server, on-disk HNSW, incremental upsert |
 | LLM extraction | Fireworks `kimi-k2p5` | High extraction quality, runs offline after session |
 | Note format | Markdown + YAML frontmatter | Obsidian-compatible, plain text, Zettelkasten |
@@ -61,6 +68,8 @@ Background worker  (launchd WatchPaths)
 | v3 | Proactive memory — Claude writes notes mid-session via MCP, indexed immediately |
 | v4 | BFS 2-level graph traversal + backlinks + Qdrant scoring for connected notes |
 | v5 | Link integrity: `sanitize_note_id`, `fix_wikilinks_in_content`, enforced `Topics:` section |
+| v6 | Re-enqueue grown sessions, last-turns extraction, JSON repair, system message for Kimi |
+| v7 | Hybrid search (BM25+vector RRF), temporal decay, confidence weighting, conflict detection, atomic writes, `vault_status.py`, `vault_reflect.py`, `vault_session_brief.py`, 40 unit tests |
 
 ---
 
@@ -72,7 +81,7 @@ Background worker  (launchd WatchPaths)
 - [Voyage AI API key](https://dash.voyageai.com) — embeddings and retrieval, 200M tokens free
 - [Fireworks API key](https://fireworks.ai) — end-of-session LLM extraction, pay-per-use
 - Claude Code with hooks enabled
-- **For v3 proactive memory (optional):** an MCP server exposing a `vault_add_note` tool, so Claude can write notes mid-session without waiting for the end-of-session pass
+- **For proactive memory (optional):** an MCP server exposing a `vault_add_note` tool
 
 ### Setup
 
@@ -82,14 +91,14 @@ cd Claude-Vault-Memory
 
 # Copy and edit config
 cp config.example.py config.py
-# Edit config.py: set VAULT_NOTES_DIR, QDRANT_PATH, ENV_FILE, QUEUE_DIR, LOG_FILE
+# Edit config.py: set VAULT_NOTES_DIR, QDRANT_PATH, ENV_FILE, QUEUE_DIR, LOG_FILE, etc.
 
 # Run interactive installer (installs packages, prompts for API keys, builds index)
 bash install.sh
 ```
 
 The installer will:
-1. Install Python dependencies (`voyageai`, `qdrant-client`, `openai`)
+1. Install Python dependencies (`voyageai`, `qdrant-client`, `openai`, `rank-bm25`)
 2. Prompt for `VOYAGE_API_KEY` and `FIREWORKS_API_KEY` and write them to `.env`
 3. Build the initial Qdrant index from your vault notes
 
@@ -142,15 +151,13 @@ cp launchd/com.example.vault-queue-worker.plist \
 launchctl load ~/Library/LaunchAgents/com.yourname.vault-queue-worker.plist
 ```
 
-The worker is triggered automatically by `launchd` when a new ticket appears in the queue directory. It runs `process_queue.py`, which reads the session transcript, calls the Fireworks API, and writes the extracted notes to your vault.
+The worker is triggered automatically by `launchd` when a new ticket appears in the queue directory.
 
 ---
 
-## v3 — Proactive Memory
+## Proactive Memory
 
-In v3, Claude writes notes **during** the session rather than waiting for the end-of-session extraction pass. This requires an MCP server with a `vault_add_note` tool.
-
-Add the following to your `CLAUDE.md` to enable the behavior:
+Claude writes notes **during** the session rather than waiting for the end-of-session extraction pass. Add to your `CLAUDE.md`:
 
 ```markdown
 **Proactive memory:** without waiting for an explicit request, save immediately
@@ -168,13 +175,9 @@ Process:
 3. Confirm in one line: "saved: [[note_id]]"
 ```
 
-The reason `vault_embed.py` must be called explicitly: the `PostToolUse` hook only fires on native `Write`/`Edit` tool calls, not on MCP tool calls like `vault_add_note`.
-
 ---
 
 ## Note format
-
-Notes are plain markdown files with YAML frontmatter. The `description` field is used as the embedding text alongside the note body.
 
 ```markdown
 ---
@@ -192,42 +195,21 @@ Body of the note: mechanism, evidence, reasoning.
 
 - [[related-note-slug]]
 - [[another-note]]
+
+---
+
+Topics:
+- [[relevant-topic-map]]
 ```
 
-The title should read as a proposition ("this note argues that..."), not a label. This makes retrieval more precise and forces atomic thinking.
+The title should read as a proposition ("this note argues that..."), not a label.
 
 ---
 
-## Configuration reference
-
-All parameters live in `config.py` (never committed):
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `VAULT_NOTES_DIR` | — | Directory containing your `.md` notes |
-| `QDRANT_PATH` | — | On-disk path for the Qdrant collection |
-| `ENV_FILE` | — | Path to `.env` file with API keys |
-| `QUEUE_DIR` | — | Directory for async session tickets |
-| `LOG_FILE` | — | Path to `auto_remember.log` |
-| `RETRIEVE_SCORE_THRESHOLD` | `0.60` | Minimum cosine score to surface a note |
-| `RETRIEVE_TOP_K` | `3` | Maximum number of notes returned per query |
-| `DEDUP_THRESHOLD` | `0.85` | Cosine score above which a new note extends an existing one |
-| `MIN_QUERY_LENGTH` | `20` | Minimum message length in chars to trigger retrieval |
-| `MIN_TURNS` | `5` | Minimum session turns to enqueue for extraction |
-| `VOYAGE_EMBED_MODEL` | `voyage-4-large` | Voyage AI model for embeddings |
-| `EMBED_DIM` | `1024` | Vector dimension (must match the model's output) |
-| `EMBED_BATCH_SIZE` | `128` | Batch size for Voyage AI embedding calls |
-| `GRAPH_CACHE_PATH` | — | Path to `vault_graph_cache.json` (auto-generated by `vault_embed.py`) |
-| `MAX_SECONDARY` | `5` | Max connected notes surfaced via BFS graph traversal |
-| `MAX_BACKLINKS_PER_NOTE` | `3` | Max backlinks injected per primary note (prevents MOC flooding) |
-| `BFS_DEPTH` | `2` | BFS depth — 2 means notes connected to connected notes |
-
----
-
-## Usage
+## Tooling
 
 ```bash
-# Build or rebuild the full index
+# Build or rebuild the full index (also rebuilds BM25 index + graph cache)
 python3 vault_embed.py
 
 # Incremental update after editing a note
@@ -238,21 +220,63 @@ python3 vault_embed.py --notes note-a note-b note-c
 
 # Test retrieval manually
 echo '{"prompt":"your query here"}' | python3 vault_retrieve.py
+
+# Health dashboard (note counts, confidence distribution, queue status)
+python3 vault_status.py
+
+# Vault reflection: detect stale/orphan notes, merge clusters (dry run by default)
+python3 vault_reflect.py
+
+# Session start brief (inject a summary of recent notes into context)
+python3 vault_session_brief.py
+
+# Run tests
+python3 -m pytest tests/
 ```
+
+---
+
+## Configuration reference
+
+All parameters live in `config.py` (never committed). See `config.example.py` for the full list with comments. Key parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `VAULT_NOTES_DIR` | — | Directory containing your `.md` notes |
+| `QDRANT_PATH` | — | On-disk path for the Qdrant collection |
+| `ENV_FILE` | — | Path to `.env` file with API keys |
+| `QUEUE_DIR` | — | Directory for async session tickets |
+| `LOG_FILE` | — | Path to `auto_remember.log` |
+| `RETRIEVE_SCORE_THRESHOLD` | `0.60` | Minimum cosine score to surface a note |
+| `RETRIEVE_TOP_K` | `3` | Maximum notes returned per query |
+| `DEDUP_THRESHOLD` | `0.85` | Cosine score above which a new note extends an existing one |
+| `MIN_TURNS` | `5` | Minimum session turns to enqueue for extraction |
+| `MIN_NEW_TURNS` | `10` | New turns required to re-process a grown session |
+| `BM25_ENABLED` | `True` | Enable hybrid BM25 + vector search (RRF) |
+| `RRF_K` | `60` | Reciprocal Rank Fusion constant |
+| `RERANK_ENABLED` | `True` | Enable Voyage AI reranking after RRF fusion |
+| `DECAY_ENABLED` | `True` | Enable temporal decay for retrieval scoring |
+| `DECAY_HALF_LIFE_DAYS` | `90` | Days until a note's score is halved without retrieval |
+| `CONFIDENCE_BOOST` | `1.2` | Score multiplier for `confidence: confirmed` notes |
+| `MAX_CODE_BLOCK_CHARS` | `500` | Max chars per code block in transcript before truncation |
+| `VOYAGE_EMBED_MODEL` | `voyage-4-large` | Voyage AI model for embeddings |
+| `BFS_DEPTH` | `2` | Graph traversal depth for connected notes |
+| `GRAPH_CACHE_PATH` | — | Path to `vault_graph_cache.json` (auto-generated) |
+| `BM25_INDEX_PATH` | — | Path to persistent BM25 index (auto-generated) |
 
 ---
 
 ## Logs
 
-All events are appended to `auto_remember.log`:
-
 ```
 [2026-01-15] EMBED_INDEX upserted: 124 notes → /path/to/vault_qdrant
 [2026-01-16] RETRIEVE query=52c → 2 notes + 1 graph (threshold 0.6)
 [2026-01-16] ENQUEUED session=a3f1c9b2 turns=18
-[2026-01-16] PROCESSING session=a3f1c9b2
+[2026-01-16] RE-ENQUEUE session=a3f1c9b2 (grew 18→45 turns, +27 new)
+[2026-01-16] Conversation truncated: last 123/220 turns (39941 chars)
 [2026-01-16] NEW      my-new-note
 [2026-01-16] DEDUP: candidate-note → EXTENDS:existing-note
+[2026-01-16] EXTENDED existing-note
 [2026-01-16] ARCHIVED session=a3f1c9b2
 ```
 
