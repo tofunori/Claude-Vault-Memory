@@ -1,0 +1,13 @@
+[Unit]
+Description=NAS Memory Profile Compaction (hourly trigger)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/volume1/Services/memory
+EnvironmentFile=/volume1/Services/memory/.env
+Environment=HOME=/home/tofunori
+Environment=PATH=/home/tofunori/.local/bin:/volume1/Services/memory/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/volume1/Services/memory/.venv/bin/python3 /volume1/Services/memory/nas_memory/profile_compact_job.py
+

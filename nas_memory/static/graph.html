@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NAS Memory Graph</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --panel: #ffffff;
+      --line: #d7dbe7;
+      --text: #1d2433;
+      --muted: #5a6477;
+      --note: #3b82f6;
+      --global: #22c55e;
+      --working: #f59e0b;
+      --edge-default: #9aa4b2;
+      --edge-supports: #34d399;
+      --edge-contradicts: #ef4444;
+      --edge-updates: #8b5cf6;
+      --edge-bridge: #6b7280;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      min-height: 100vh;
+    }
+    aside {
+      background: var(--panel);
+      border-right: 1px solid var(--line);
+      padding: 16px;
+      overflow: auto;
+    }
+    main {
+      position: relative;
+      min-height: 100vh;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 20px;
+    }
+    h2 {
+      margin: 14px 0 8px;
+      font-size: 14px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .muted { color: var(--muted); font-size: 12px; }
+    .controls, .legend, .stats, .selected {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      background: #fff;
+      margin-bottom: 10px;
+    }
+    .check-list label {
+      display: block;
+      margin: 5px 0;
+      font-size: 13px;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      margin: 8px 0;
+    }
+    input[type="text"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+    button {
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 8px;
+      padding: 7px 10px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    button:hover { background: #f1f5ff; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin: 2px 6px 2px 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      display: inline-block;
+    }
+    #graph {
+      width: 100%;
+      height: 100vh;
+    }
+    .warning {
+      border: 1px solid #f59e0b;
+      background: #fffbeb;
+      color: #92400e;
+      border-radius: 8px;
+      padding: 6px 8px;
+      margin-top: 6px;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>Unified Memory Graph</h1>
+    <div class="muted">Notes + V1.3 memory nodes/relations</div>
+
+    <div class="controls">
+      <h2>Search</h2>
+      <input id="search" type="text" placeholder="note id, text, memory id...">
+      <div class="row">
+        <button id="btn-center">Center on match</button>
+        <button id="btn-isolate">Isolate component</button>
+        <button id="btn-reset">Reset</button>
+      </div>
+    </div>
+
+    <div class="controls">
+      <h2>Node Filters</h2>
+      <div class="check-list">
+        <label><input type="checkbox" id="f-note" checked> Notes</label>
+        <label><input type="checkbox" id="f-global" checked> Memory global_profile</label>
+        <label><input type="checkbox" id="f-working" checked> Memory working_memory</label>
+        <label><input type="checkbox" id="f-forgotten"> Show forgotten</label>
+        <label><input type="checkbox" id="f-superseded"> Show superseded</label>
+      </div>
+    </div>
+
+    <div class="controls">
+      <h2>Edge Filters</h2>
+      <div class="check-list">
+        <label><input type="checkbox" id="e-links_to" checked> links_to</label>
+        <label><input type="checkbox" id="e-supports" checked> supports</label>
+        <label><input type="checkbox" id="e-contradicts" checked> contradicts</label>
+        <label><input type="checkbox" id="e-updates" checked> updates</label>
+        <label><input type="checkbox" id="e-references_note" checked> references_note</label>
+      </div>
+    </div>
+
+    <div class="stats" id="stats">Loading graph...</div>
+
+    <div class="selected" id="selected">
+      <h2>Selected Node</h2>
+      <div class="muted">No node selected</div>
+    </div>
+
+    <div class="legend">
+      <h2>Legend</h2>
+      <span class="chip"><span class="dot" style="background: var(--note)"></span>note</span>
+      <span class="chip"><span class="dot" style="background: var(--global)"></span>memory global</span>
+      <span class="chip"><span class="dot" style="background: var(--working)"></span>memory working</span>
+      <span class="chip"><span class="dot" style="background: var(--edge-contradicts)"></span>contradicts</span>
+      <span class="chip"><span class="dot" style="background: var(--edge-updates)"></span>updates</span>
+      <span class="chip"><span class="dot" style="background: var(--edge-supports)"></span>supports</span>
+      <span class="chip"><span class="dot" style="background: var(--edge-bridge)"></span>references_note</span>
+    </div>
+  </aside>
+
+  <main>
+    <svg id="graph"></svg>
+  </main>
+
+  <script>
+    const svg = d3.select("#graph");
+    let width = window.innerWidth - 360;
+    let height = window.innerHeight;
+    svg.attr("width", width).attr("height", height);
+
+    const zoomLayer = svg.append("g");
+    const edgeLayer = zoomLayer.append("g");
+    const nodeLayer = zoomLayer.append("g");
+    const labelLayer = zoomLayer.append("g");
+
+    const zoom = d3.zoom().scaleExtent([0.1, 6]).on("zoom", (event) => {
+      zoomLayer.attr("transform", event.transform);
+    });
+    svg.call(zoom);
+
+    let rawGraph = null;
+    let simulation = null;
+    let selectedNodeId = null;
+    let isolateMode = false;
+
+    const statsBox = document.getElementById("stats");
+    const selectedBox = document.getElementById("selected");
+    const searchInput = document.getElementById("search");
+
+    function edgeColor(relation) {
+      if (relation === "supports") return getComputedStyle(document.documentElement).getPropertyValue("--edge-supports");
+      if (relation === "contradicts") return getComputedStyle(document.documentElement).getPropertyValue("--edge-contradicts");
+      if (relation === "updates") return getComputedStyle(document.documentElement).getPropertyValue("--edge-updates");
+      if (relation === "references_note") return getComputedStyle(document.documentElement).getPropertyValue("--edge-bridge");
+      return getComputedStyle(document.documentElement).getPropertyValue("--edge-default");
+    }
+
+    function nodeColor(node) {
+      if (node.status === "forgotten") return "#94a3b8";
+      if (node.status === "superseded") return "#64748b";
+      if (node.kind === "note") return getComputedStyle(document.documentElement).getPropertyValue("--note");
+      if (node.scope === "global_profile") return getComputedStyle(document.documentElement).getPropertyValue("--global");
+      return getComputedStyle(document.documentElement).getPropertyValue("--working");
+    }
+
+    function includeNode(node) {
+      if (node.kind === "note" && !document.getElementById("f-note").checked) return false;
+      if (node.kind === "memory" && node.scope === "global_profile" && !document.getElementById("f-global").checked) return false;
+      if (node.kind === "memory" && node.scope === "working_memory" && !document.getElementById("f-working").checked) return false;
+      if (node.status === "forgotten" && !document.getElementById("f-forgotten").checked) return false;
+      if (node.status === "superseded" && !document.getElementById("f-superseded").checked) return false;
+      const q = searchInput.value.trim().toLowerCase();
+      if (!q) return true;
+      const hay = [node.id, node.label, node.fact_text || "", node.note_id || "", node.memory_id || ""].join(" ").toLowerCase();
+      return hay.includes(q);
+    }
+
+    function includeEdge(edge) {
+      const id = `e-${edge.relation}`;
+      const el = document.getElementById(id);
+      if (!el) return true;
+      return el.checked;
+    }
+
+    function componentFrom(nodeId, nodes, edges) {
+      const adj = new Map();
+      for (const n of nodes) adj.set(n.id, new Set());
+      for (const e of edges) {
+        if (adj.has(e.source) && adj.has(e.target)) {
+          adj.get(e.source).add(e.target);
+          adj.get(e.target).add(e.source);
+        }
+      }
+      if (!adj.has(nodeId)) return new Set();
+      const visited = new Set([nodeId]);
+      const stack = [nodeId];
+      while (stack.length) {
+        const cur = stack.pop();
+        for (const nxt of adj.get(cur)) {
+          if (!visited.has(nxt)) {
+            visited.add(nxt);
+            stack.push(nxt);
+          }
+        }
+      }
+      return visited;
+    }
+
+    function filteredGraph() {
+      if (!rawGraph) return { nodes: [], edges: [] };
+      let nodes = rawGraph.nodes.filter(includeNode);
+      const nodeSet = new Set(nodes.map(n => n.id));
+      let edges = rawGraph.edges.filter(e => includeEdge(e) && nodeSet.has(e.source) && nodeSet.has(e.target));
+
+      if (isolateMode && selectedNodeId) {
+        const keep = componentFrom(selectedNodeId, nodes, edges);
+        if (keep.size > 0) {
+          nodes = nodes.filter(n => keep.has(n.id));
+          const keepIds = new Set(nodes.map(n => n.id));
+          edges = edges.filter(e => keepIds.has(e.source) && keepIds.has(e.target));
+        }
+      }
+      return { nodes, edges };
+    }
+
+    function renderStats(graph) {
+      const stats = rawGraph?.stats || {};
+      const warnings = rawGraph?.warnings || [];
+      statsBox.innerHTML = `
+        <h2>Stats</h2>
+        <div class="muted">Visible nodes: ${graph.nodes.length}</div>
+        <div class="muted">Visible edges: ${graph.edges.length}</div>
+        <div class="muted">Note nodes: ${stats.note_nodes ?? 0}</div>
+        <div class="muted">Memory nodes: ${stats.memory_nodes ?? 0}</div>
+        <div class="muted">Components: ${stats.components ?? 0}</div>
+      `;
+      for (const w of warnings) {
+        const div = document.createElement("div");
+        div.className = "warning";
+        div.textContent = w;
+        statsBox.appendChild(div);
+      }
+    }
+
+    function renderSelected(node) {
+      if (!node) {
+        selectedBox.innerHTML = `<h2>Selected Node</h2><div class="muted">No node selected</div>`;
+        return;
+      }
+      selectedBox.innerHTML = `
+        <h2>Selected Node</h2>
+        <div><strong>${node.label}</strong></div>
+        <div class="muted">id: ${node.id}</div>
+        <div class="muted">kind: ${node.kind} ${node.scope ? `(${node.scope})` : ""}</div>
+        <div class="muted">status: ${node.status || "active"}</div>
+        <div class="muted">type: ${node.fact_type || node.type || "-"}</div>
+      `;
+      if (node.fact_text) {
+        const p = document.createElement("div");
+        p.className = "muted";
+        p.style.marginTop = "6px";
+        p.textContent = node.fact_text;
+        selectedBox.appendChild(p);
+      }
+    }
+
+    function draw() {
+      const graph = filteredGraph();
+      renderStats(graph);
+
+      if (simulation) simulation.stop();
+      edgeLayer.selectAll("*").remove();
+      nodeLayer.selectAll("*").remove();
+      labelLayer.selectAll("*").remove();
+
+      const links = edgeLayer.selectAll("line")
+        .data(graph.edges, d => d.id)
+        .enter()
+        .append("line")
+        .attr("stroke", d => edgeColor(d.relation))
+        .attr("stroke-opacity", 0.6)
+        .attr("stroke-width", d => d.relation === "links_to" ? 1.2 : 1.8);
+
+      const nodes = nodeLayer.selectAll("circle")
+        .data(graph.nodes, d => d.id)
+        .enter()
+        .append("circle")
+        .attr("r", d => d.kind === "note" ? 5 : 6.5)
+        .attr("fill", d => nodeColor(d))
+        .attr("stroke", d => d.id === selectedNodeId ? "#111827" : "#ffffff")
+        .attr("stroke-width", d => d.id === selectedNodeId ? 2 : 1)
+        .call(d3.drag()
+          .on("start", (event, d) => {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+          })
+          .on("drag", (event, d) => {
+            d.fx = event.x;
+            d.fy = event.y;
+          })
+          .on("end", (event, d) => {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+          })
+        )
+        .on("click", (_, d) => {
+          selectedNodeId = d.id;
+          renderSelected(d);
+          draw();
+        });
+
+      const labels = labelLayer.selectAll("text")
+        .data(graph.nodes, d => d.id)
+        .enter()
+        .append("text")
+        .text(d => d.label)
+        .attr("font-size", 10)
+        .attr("fill", "#4b5563")
+        .attr("pointer-events", "none");
+
+      simulation = d3.forceSimulation(graph.nodes)
+        .force("link", d3.forceLink(graph.edges).id(d => d.id).distance(70).strength(0.2))
+        .force("charge", d3.forceManyBody().strength(-120))
+        .force("center", d3.forceCenter(width / 2, height / 2))
+        .force("collide", d3.forceCollide(12))
+        .on("tick", () => {
+          links
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+          nodes
+            .attr("cx", d => d.x)
+            .attr("cy", d => d.y);
+          labels
+            .attr("x", d => d.x + 7)
+            .attr("y", d => d.y + 3);
+        });
+    }
+
+    function centerOnMatch() {
+      if (!rawGraph) return;
+      const q = searchInput.value.trim().toLowerCase();
+      if (!q) return;
+      const graph = filteredGraph();
+      const target = graph.nodes.find(n => [n.id, n.label, n.fact_text || ""].join(" ").toLowerCase().includes(q));
+      if (!target) return;
+      selectedNodeId = target.id;
+      renderSelected(target);
+      draw();
+      const transform = d3.zoomIdentity.translate(width / 2 - target.x, height / 2 - target.y).scale(1.2);
+      svg.transition().duration(350).call(zoom.transform, transform);
+    }
+
+    function resolveGraphEndpoint() {
+      const qp = new URLSearchParams(window.location.search);
+      const explicit = qp.get("api");
+      if (explicit) return explicit;
+      if (window.location.pathname.endsWith("/ui")) {
+        return window.location.pathname.slice(0, -3); // /admin/graph/ui -> /admin/graph
+      }
+      return "/admin/graph";
+    }
+
+    function resolveBearerToken() {
+      const qp = new URLSearchParams(window.location.search);
+      const tokenFromUrl = qp.get("token");
+      if (tokenFromUrl) {
+        window.localStorage.setItem("memory_api_token", tokenFromUrl);
+        return tokenFromUrl;
+      }
+      return window.localStorage.getItem("memory_api_token") || "";
+    }
+
+    async function loadGraph() {
+      try {
+        const endpoint = resolveGraphEndpoint();
+        const token = resolveBearerToken();
+        const headers = {};
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const resp = await fetch(endpoint, { credentials: "same-origin", headers });
+        rawGraph = await resp.json();
+        if (!rawGraph || rawGraph.status !== "ok") {
+          throw new Error((rawGraph?.warnings?.join(" | ") || "graph endpoint error") + ` [endpoint=${endpoint}]`);
+        }
+        draw();
+      } catch (err) {
+        const endpoint = resolveGraphEndpoint();
+        statsBox.innerHTML = `<div class="warning">Failed to load graph: ${err} [endpoint=${endpoint}]</div>`;
+      }
+    }
+
+    document.querySelectorAll("input[type=checkbox]").forEach(el => el.addEventListener("change", () => draw()));
+    searchInput.addEventListener("input", () => draw());
+    document.getElementById("btn-center").addEventListener("click", centerOnMatch);
+    document.getElementById("btn-isolate").addEventListener("click", () => {
+      isolateMode = !isolateMode;
+      draw();
+    });
+    document.getElementById("btn-reset").addEventListener("click", () => {
+      isolateMode = false;
+      selectedNodeId = null;
+      renderSelected(null);
+      searchInput.value = "";
+      draw();
+      svg.transition().duration(300).call(zoom.transform, d3.zoomIdentity);
+    });
+
+    window.addEventListener("resize", () => {
+      width = window.innerWidth - 360;
+      height = window.innerHeight;
+      svg.attr("width", width).attr("height", height);
+      if (simulation) {
+        simulation.force("center", d3.forceCenter(width / 2, height / 2));
+        simulation.alpha(0.2).restart();
+      }
+    });
+
+    loadGraph();
+  </script>
+</body>
+</html>

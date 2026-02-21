@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NAS Memory Relation Compaction hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=memory-relation-compact.service
+
+[Install]
+WantedBy=timers.target

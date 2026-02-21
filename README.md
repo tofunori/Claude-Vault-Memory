@@ -2,6 +2,24 @@
 
 Persistent semantic memory for [Claude Code](https://claude.ai/claude-code). Every message you send is matched against a local knowledge graph of your markdown notes. Relevant notes are injected into Claude's context before it replies. At the end of each session, an LLM pass extracts durable facts and writes them back as typed, versioned atomic notes.
 
+## NAS unified memory (V1.x / V1.3R)
+
+This repository now also includes a NAS-hosted unified memory stack for Claude Code, Codex, and OpenClaw:
+
+- API + worker: `nas_memory/api.py`, `nas_memory/worker.py`
+- Single-writer queue (SQLite WAL) with staging/live memory and profile layer
+- Admin graph UI (`/admin/graph/ui`) and unified graph payload (`/admin/graph`)
+- V1.3R relation compaction (shadow/write mode) to reduce isolated memory nodes:
+  - admin endpoints: `/admin/relations/compact`, `/admin/relations/stats`
+  - linker engine: `nas_memory/relation_linker.py`
+  - hourly timer job: `nas_memory/systemd/memory-relation-compact.timer`
+- Burn-in tooling with strict gates in `nas_memory/burnin/`
+
+Operational instructions for NAS mode are in:
+
+- `nas_memory/README.md`
+- `nas_memory/burnin/README.md`
+
 ---
 
 ## Architecture

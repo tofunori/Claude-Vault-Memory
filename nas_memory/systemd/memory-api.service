@@ -1,0 +1,17 @@
+[Unit]
+Description=NAS Memory API (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/volume1/Services/memory
+EnvironmentFile=/volume1/Services/memory/.env
+Environment=HOME=/home/tofunori
+Environment=PATH=/home/tofunori/.local/bin:/volume1/Services/memory/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/volume1/Services/memory/nas_memory/run-api.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -167,6 +167,9 @@ def check_semantic_dup(content: str) -> tuple[bool, str]:
 
 def upsert_note_async(note_id: str):
     """Runs vault_embed.py in background to upsert a note into Qdrant."""
+    if os.environ.get("DISABLE_ASYNC_UPSERT", "").strip() == "1":
+        log(f"EMBED async upsert disabled by env for: {note_id}")
+        return
     try:
         script = str(HOOKS_DIR / "vault_embed.py")
         subprocess.Popen(

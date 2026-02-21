@@ -1,0 +1,11 @@
+[Unit]
+Description=Run NAS Memory Profile Compaction hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=memory-profile-compact.service
+
+[Install]
+WantedBy=timers.target
+
