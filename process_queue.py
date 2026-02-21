@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     from config import (
         VAULT_NOTES_DIR, LOG_FILE, ENV_FILE, QUEUE_DIR, QDRANT_PATH,
-        DEDUP_THRESHOLD, FIREWORKS_BASE_URL, FIREWORKS_MODEL, VOYAGE_EMBED_MODEL,
+        DEDUP_THRESHOLD, CLAUDE_EXTRACT_MODEL, VOYAGE_EMBED_MODEL,
     )
     VAULT_NOTES_DIR = Path(VAULT_NOTES_DIR)
     LOG_FILE = Path(LOG_FILE)
@@ -378,21 +378,20 @@ def pre_query_vault(conversation: str, notes_dir: Path, top_k: int = 5) -> str:
 # ─── LLM Extraction ─────────────────────────────────────────────────────────
 
 
+def _call_claude_headless(prompt: str, timeout: int = 120) -> str:
+    """Call claude CLI in headless (-p) mode. Unsets CLAUDECODE to allow subprocess."""
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+    result = subprocess.run(
+        ["claude", "-p", prompt, "--model", CLAUDE_EXTRACT_MODEL],
+        capture_output=True, text=True, timeout=timeout, env=env
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"claude -p exit {result.returncode}: {result.stderr[:500]}")
+    return result.stdout.strip()
+
+
 def extract_facts_with_llm(conversation: str, existing_notes: str, related_context: str) -> list:
-    try:
-        from openai import OpenAI
-    except ImportError:
-        log("openai package not installed, skipping")
-        return []
-
-    env = load_env_file()
-    api_key = env.get("FIREWORKS_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
-    if not api_key:
-        log("FIREWORKS_API_KEY missing, skipping")
-        return []
-
-    client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
-
     # Strip Claude Code UI tags that confuse the extraction LLM
     clean_conversation = re.sub(r'<system-reminder>.*?</system-reminder>', '', conversation, flags=re.DOTALL)
     clean_conversation = re.sub(r'<local-command-caveat>.*?</local-command-caveat>', '', clean_conversation, flags=re.DOTALL)
@@ -453,16 +452,8 @@ SESSION TRANSCRIPT:
 
     raw = ""
     try:
-        response = client.chat.completions.create(
-            model=FIREWORKS_MODEL,
-            max_tokens=10000,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ]
-        )
-
-        raw = response.choices[0].message.content.strip()
+        full_prompt = f"{system_msg}\n\n{user_msg}"
+        raw = _call_claude_headless(full_prompt)
         raw = re.sub(r'^```(?:json)?\n?', '', raw)
         raw = re.sub(r'\n?```$', '', raw)
         raw = _repair_json_newlines(raw)
@@ -475,7 +466,7 @@ SESSION TRANSCRIPT:
         log(f"Invalid JSON from LLM: {e} — raw: {raw[:300]}")
         return []
     except Exception as e:
-        log(f"Fireworks API error: {e}")
+        log(f"Claude headless error: {e}")
         return []
 
 
@@ -514,33 +505,18 @@ def validate_extracted_facts(facts: list, conversation: str) -> list:
     if not VALIDATION_ENABLED or not facts:
         return facts
 
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return facts
-
-    env = load_env_file()
-    api_key = env.get("FIREWORKS_API_KEY") or os.environ.get("FIREWORKS_API_KEY")
-    if not api_key:
-        return facts
-
-    client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
-
     # Build compact summary of facts for validation
     fact_summaries = []
     for i, f in enumerate(facts):
-        desc = ""
         content = f.get("content", "")
-        # Extract description from content frontmatter
         desc_m = re.search(r'description:\s*(.+)', content)
-        if desc_m:
-            desc = desc_m.group(1).strip()
-        else:
-            desc = content[:150]
+        desc = desc_m.group(1).strip() if desc_m else content[:150]
         fact_summaries.append(f"{i}: [{f.get('relation', 'NEW')}] {f.get('note_id', '?')} — {desc}")
 
-    prompt = f"""You are a fact-checker. Given a conversation transcript and a list of extracted facts,
-identify which facts are NOT actually supported by the conversation.
+    prompt = f"""Output ONLY a JSON array of integers. No prose, no explanation.
+
+You are a fact-checker. Given a conversation transcript and a list of extracted facts,
+return the indices of facts that ARE actually grounded in the conversation.
 
 FACTS TO VALIDATE:
 {chr(10).join(fact_summaries)}
@@ -548,21 +524,13 @@ FACTS TO VALIDATE:
 CONVERSATION (last 5000 chars):
 {conversation[-5000:]}
 
-Return ONLY a JSON array of indices (0-based) of facts that ARE valid and grounded in the conversation.
-Example: [0, 2, 3] means facts 0, 2, and 3 are valid; fact 1 is hallucinated.
-If all facts are valid: {list(range(len(facts)))}
-If no facts are valid: []"""
+Return ONLY a JSON array of 0-based indices of valid facts.
+Example: [0, 2, 3] means facts 0, 2, 3 are valid; fact 1 is hallucinated.
+If all valid: {list(range(len(facts)))}
+If none valid: []"""
 
     try:
-        response = client.chat.completions.create(
-            model=FIREWORKS_MODEL,
-            max_tokens=500,
-            messages=[
-                {"role": "system", "content": "Output ONLY a JSON array of integers. No prose."},
-                {"role": "user", "content": prompt},
-            ]
-        )
-        raw = response.choices[0].message.content.strip()
+        raw = _call_claude_headless(prompt, timeout=60)
         raw = re.sub(r'^```(?:json)?\n?', '', raw)
         raw = re.sub(r'\n?```$', '', raw)
         valid_indices = json.loads(raw)
@@ -717,6 +685,44 @@ def write_note(note_id: str, content: str, relation: str):
     log(f"NEW      {note_id}")
 
 
+# ─── MOC Auto-linking ────────────────────────────────────────────────────────
+
+
+def _auto_link_to_mocs(note_id: str, content: str):
+    """Ajoute un lien retour dans chaque MOC listé dans la section Topics: de la note."""
+    m = re.search(r'\nTopics:\n((?:- \[\[[^\]]+\]\]\n?)+)', content)
+    if not m:
+        return
+    topics = re.findall(r'\[\[([^\]]+)\]\]', m.group(1))
+
+    desc_m = re.search(r'^description:\s*(.+)$', content, re.MULTILINE)
+    description = desc_m.group(1).strip() if desc_m else note_id.replace('-', ' ')
+
+    link_line = f"- [[{note_id}]] — {description}\n"
+
+    for moc_id in topics:
+        moc_path = VAULT_NOTES_DIR / f"{moc_id}.md"
+        if not moc_path.exists():
+            continue
+        moc_content = moc_path.read_text(encoding="utf-8")
+        if f"[[{note_id}]]" in moc_content:
+            continue  # Déjà lié
+
+        if "\n## Récentes\n" in moc_content:
+            moc_content = moc_content.replace(
+                "\n## Récentes\n", f"\n## Récentes\n{link_line}"
+            )
+        elif "\n---\n\nTopics:" in moc_content:
+            moc_content = moc_content.replace(
+                "\n---\n\nTopics:", f"\n\n## Récentes\n{link_line}\n---\n\nTopics:"
+            )
+        else:
+            moc_content = moc_content.rstrip() + f"\n\n## Récentes\n{link_line}"
+
+        write_file_atomic(moc_path, moc_content)
+        log(f"AUTO-LINK {note_id} → {moc_id}")
+
+
 # ─── Source Chunk Storage ──────────────────────────────────────────────────
 
 
@@ -831,6 +837,10 @@ def process_ticket(ticket_path: Path):
             write_note(note_id, content, relation)
             written += 1
             written_ids.append(note_id)
+
+            # Auto-link NEW notes into their referenced MOCs (prevents orphans)
+            if relation == "NEW":
+                _auto_link_to_mocs(note_id, content)
 
             # Save source conversation chunk for retrieval injection
             save_source_chunk(note_id, relation, conversation)
