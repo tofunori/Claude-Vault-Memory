@@ -82,6 +82,15 @@ COLLECTION = "vault_notes"
 
 TODAY = date.today().isoformat()
 
+_STATUS_FILE = Path.home() / ".claude/hooks/memory_status.txt"
+
+
+def _write_memory_status(msg: str):
+    try:
+        _STATUS_FILE.write_text(msg, encoding="utf-8")
+    except Exception:
+        pass
+
 
 def log(msg: str):
     try:
@@ -793,6 +802,7 @@ def process_ticket(ticket_path: Path):
     # Second-pass validation: reject hallucinated facts
     facts = validate_extracted_facts(facts, conversation)
     written = 0
+    written_ids: list[str] = []
     for fact in facts:
         try:
             note_id = fact.get("note_id", "").strip()
@@ -820,6 +830,7 @@ def process_ticket(ticket_path: Path):
 
             write_note(note_id, content, relation)
             written += 1
+            written_ids.append(note_id)
 
             # Save source conversation chunk for retrieval injection
             save_source_chunk(note_id, relation, conversation)
@@ -839,6 +850,12 @@ def process_ticket(ticket_path: Path):
             log(f"Error writing {fact.get('note_id', '?')}: {e}")
 
     log(f"Notes written: {written}/{len(facts)}")
+    if written > 0:
+        if len(written_ids) <= 3:
+            label = " ".join(f"[[{i}]]" for i in written_ids)
+        else:
+            label = " ".join(f"[[{i}]]" for i in written_ids[:2]) + f" +{len(written_ids) - 2}"
+        _write_memory_status(f"⚡ {label}")
     _archive(ticket_path, session_id, turn_count)
 
 

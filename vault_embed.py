@@ -72,6 +72,15 @@ STOPWORDS = frozenset({
 })
 TODAY = date.today().isoformat()
 
+_STATUS_FILE = Path.home() / ".claude/hooks/memory_status.txt"
+
+
+def _write_memory_status(msg: str):
+    try:
+        _STATUS_FILE.write_text(msg, encoding="utf-8")
+    except Exception:
+        pass
+
 
 def log(msg: str):
     try:
@@ -282,6 +291,9 @@ def upsert_notes(note_ids: list[str] | None = None):
             log(f"EMBED Qdrant upsert error (batch {i}): {e}")
 
     log(f"EMBED_INDEX upserted: {total} notes")
+    if note_ids is not None and total > 0:
+        label = f"[[{note_ids[0]}]]" if len(note_ids) == 1 else f"{total} notes"
+        _write_memory_status(f"⚡ {label}")
     if note_ids is None:
         print(f"EMBED_INDEX upserted: {total} notes → {QDRANT_PATH}")
 
