@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-vault_embed.py — Build/upsert local Qdrant index from vault notes.
+vault_embed.py — Build/upsert local Qdrant index from vault notes (v7).
 
 Usage:
-  python3 vault_embed.py              → full rebuild (all notes)
+  python3 vault_embed.py              → full rebuild (all notes + BM25 index)
   python3 vault_embed.py --note ID    → incremental upsert (single note)
   python3 vault_embed.py --notes A B  → incremental upsert (list of notes)
+
+v7: builds persistent BM25 index alongside Qdrant for hybrid search.
 """
 
+import json as _json
 import os
 import re
 import sys
 import uuid
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -43,7 +47,29 @@ except ImportError:
     EMBED_DIM = 1024
     EMBED_BATCH_SIZE = 128
 
+try:
+    from config import BM25_INDEX_PATH as _BM25_INDEX_PATH
+    BM25_INDEX_PATH = Path(_BM25_INDEX_PATH)
+except ImportError:
+    BM25_INDEX_PATH = None
+
 COLLECTION = "vault_notes"
+
+# Stopwords (same as vault_retrieve.py)
+STOPWORDS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "to", "of", "in", "for",
+    "on", "with", "at", "by", "from", "as", "into", "about", "between",
+    "through", "during", "before", "after", "above", "below", "and", "but",
+    "or", "not", "no", "if", "then", "than", "so", "that", "this", "it",
+    "its", "my", "your", "his", "her", "our", "their", "what", "which",
+    "who", "whom", "how", "when", "where", "why", "all", "each", "every",
+    "both", "few", "more", "most", "some", "any", "just", "also", "very",
+    "le", "la", "les", "de", "du", "des", "un", "une", "et", "est", "en",
+    "que", "qui", "dans", "pour", "sur", "avec", "par", "pas", "plus",
+    "je", "tu", "il", "elle", "nous", "vous", "ils", "elles", "ce", "se",
+})
 TODAY = date.today().isoformat()
 
 
@@ -110,10 +136,12 @@ def parse_note(path: Path) -> dict | None:
     type_m = re.search(r'^type:\s*(.+)$', text, re.MULTILINE)
     title_m = re.search(r'^#\s+(.+)$', text, re.MULTILINE)
     created_m = re.search(r'^created:\s*(.+)$', text, re.MULTILINE)
+    confidence_m = re.search(r'^confidence:\s*(.+)$', text, re.MULTILINE)
 
     description = desc_m.group(1).strip() if desc_m else (title_m.group(1).strip() if title_m else path.stem)
     note_type = type_m.group(1).strip() if type_m else "concept"
     created = created_m.group(1).strip() if created_m else TODAY
+    confidence = confidence_m.group(1).strip() if confidence_m else "experimental"
 
     body = re.sub(r'^---.*?---\s*', '', text, flags=re.DOTALL).strip()
     embed_text = f"{description}\n\n{body}"[:4000]  # voyage-4-large handles long context
@@ -124,6 +152,7 @@ def parse_note(path: Path) -> dict | None:
         "description": description,
         "type": note_type,
         "created": created,
+        "confidence": confidence,
     }
 
 
@@ -163,6 +192,39 @@ def build_graph_index(notes: list[dict]) -> tuple[dict, dict]:
         for t in targets:
             backlinks.setdefault(t, []).append(src)
     return outbound, backlinks
+
+
+def _tokenize(text: str) -> list[str]:
+    words = re.findall(r'[a-zA-Z0-9_\-\.]+', text.lower())
+    return [w for w in words if w not in STOPWORDS and len(w) > 1]
+
+
+def build_bm25_index(notes: list[dict]):
+    """Build persistent BM25 index from parsed notes. Saved as JSON."""
+    if BM25_INDEX_PATH is None:
+        return
+
+    try:
+        index = []
+        for n in notes:
+            tokens = _tokenize(n["text"])
+            index.append({
+                "note_id": n["note_id"],
+                "tf": dict(Counter(tokens)),
+                "len": len(tokens),
+                "description": n["description"],
+                "type": n["type"],
+                "confidence": n.get("confidence", "experimental"),
+            })
+
+        BM25_INDEX_PATH.write_text(
+            _json.dumps(index, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        log(f"BM25 index built: {len(index)} docs → {BM25_INDEX_PATH}")
+        print(f"BM25 index built: {len(index)} docs → {BM25_INDEX_PATH}")
+    except Exception as e:
+        log(f"BM25 index error: {e}")
 
 
 def upsert_notes(note_ids: list[str] | None = None):
@@ -205,6 +267,8 @@ def upsert_notes(note_ids: list[str] | None = None):
                     "description": n["description"],
                     "type": n["type"],
                     "created": n["created"],
+                    "confidence": n["confidence"],
+                    "last_retrieved": n["created"],  # Initialize to created date
                     "updated_at": TODAY,
                 }
             )
@@ -220,9 +284,12 @@ def upsert_notes(note_ids: list[str] | None = None):
     log(f"EMBED_INDEX upserted: {total} notes")
     if note_ids is None:
         print(f"EMBED_INDEX upserted: {total} notes → {QDRANT_PATH}")
+
+        # Build persistent BM25 index
+        build_bm25_index(notes)
+
         # Rebuild graph cache from parsed notes (no extra I/O needed)
         try:
-            import json
             outbound, backlinks = build_graph_index(notes)
             cache = {
                 "built_at": TODAY,
@@ -230,7 +297,7 @@ def upsert_notes(note_ids: list[str] | None = None):
                 "outbound": outbound,
                 "backlinks": backlinks,
             }
-            GRAPH_CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+            GRAPH_CACHE_PATH.write_text(_json.dumps(cache, ensure_ascii=False), encoding="utf-8")
             edge_count = sum(len(v) for v in outbound.values())
             log(f"EMBED graph cache: {len(outbound)} notes, {edge_count} edges")
             print(f"EMBED graph cache: {len(outbound)} notes, {edge_count} edges → {GRAPH_CACHE_PATH}")

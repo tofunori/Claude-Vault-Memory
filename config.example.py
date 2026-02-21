@@ -67,3 +67,113 @@ MAX_BACKLINKS_PER_NOTE = 3
 
 # BFS depth for graph traversal (2 = notes connected to connected notes)
 BFS_DEPTH = 2
+
+
+# ─── Hybrid search (BM25 + vector) ──────────────────────────────────────────
+
+# Enable keyword search alongside vector search (Reciprocal Rank Fusion)
+BM25_ENABLED = True
+
+# RRF constant (higher = less emphasis on top ranks)
+RRF_K = 60
+
+# Number of keyword results to consider before fusion
+BM25_TOP_K = 10
+
+# Number of vector results to consider before fusion
+VECTOR_TOP_K = 10
+
+# Final number of primary notes after RRF fusion
+RRF_FINAL_TOP_K = 3
+
+
+# ─── Confidence weighting ───────────────────────────────────────────────────
+
+# Boost factor for notes with confidence: confirmed (vs experimental)
+CONFIDENCE_BOOST = 1.2
+
+
+# ─── Temporal decay ─────────────────────────────────────────────────────────
+
+# Enable temporal decay (notes accessed recently rank higher)
+DECAY_ENABLED = True
+
+# Half-life in days: after this many days without retrieval, score is halved
+DECAY_HALF_LIFE_DAYS = 90
+
+# Minimum decay factor (notes never drop below this fraction of their score)
+DECAY_FLOOR = 0.3
+
+
+# ─── Smart truncation ───────────────────────────────────────────────────────
+
+# Maximum chars per individual code block in transcript (rest truncated)
+MAX_CODE_BLOCK_CHARS = 500
+
+# Minimum number of new turns to re-enqueue a grown session
+MIN_NEW_TURNS = 10
+
+
+# ─── Reranking ───────────────────────────────────────────────────────────────
+
+# Enable Voyage AI reranking after RRF fusion (improves precision, adds ~100ms)
+RERANK_ENABLED = True
+
+# Voyage AI reranking model
+RERANK_MODEL = "rerank-2"
+
+# Number of candidates to feed to the reranker (before final top_k selection)
+RERANK_CANDIDATES = 10
+
+
+# ─── BM25 persistent index ──────────────────────────────────────────────────
+
+# Path to the persistent BM25 index (rebuilt by vault_embed.py)
+BM25_INDEX_PATH = "/home/yourname/.claude/hooks/vault_bm25_index.json"
+
+
+# ─── Extraction validation ───────────────────────────────────────────────────
+
+# Enable second-pass validation of extracted facts (catches hallucinated extractions)
+VALIDATION_ENABLED = True
+
+
+# ─── Reflector ───────────────────────────────────────────────────────────────
+
+# Minimum number of notes to trigger reflection (below this, vault is too small)
+REFLECT_MIN_NOTES = 30
+
+# Cosine similarity threshold to consider notes as a mergeable cluster
+REFLECT_CLUSTER_THRESHOLD = 0.82
+
+# Maximum age in days before a never-retrieved note is flagged as stale
+REFLECT_STALE_DAYS = 180
+
+
+# ─── Source chunk storage ────────────────────────────────────────────────────
+
+# Save conversation excerpts that generated each note (for retrieval injection)
+SOURCE_CHUNKS_ENABLED = True
+
+# Directory for source chunks (default: VAULT_NOTES_DIR/_sources)
+SOURCE_CHUNKS_DIR = "/home/yourname/notes/_sources"
+
+# Maximum chars of conversation to save per note
+SOURCE_CHUNK_MAX_CHARS = 2000
+
+# Maximum chars of source context injected during retrieval (per note)
+SOURCE_INJECT_MAX_CHARS = 800
+
+
+# ─── Smart forgetting ───────────────────────────────────────────────────────
+
+# Directory for archived (forgotten) notes (default: VAULT_NOTES_DIR/_archived)
+FORGET_ARCHIVE_DIR = "/home/yourname/notes/_archived"
+
+# Default TTL (days) per note type. Notes of these types are auto-archived
+# after this many days since creation. Set to {} to disable type-based TTL.
+# Notes with an explicit forget_after frontmatter field are always respected.
+FORGET_DEFAULT_TTL_DAYS = {
+    # "context": 90,    # Context notes expire after 90 days
+    # "result": 60,     # Result notes expire after 60 days
+}
