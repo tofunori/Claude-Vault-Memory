@@ -67,3 +67,48 @@ MAX_BACKLINKS_PER_NOTE = 3
 
 # BFS depth for graph traversal (2 = notes connected to connected notes)
 BFS_DEPTH = 2
+
+
+# ─── Hybrid search (BM25 + vector) ──────────────────────────────────────────
+
+# Enable keyword search alongside vector search (Reciprocal Rank Fusion)
+BM25_ENABLED = True
+
+# RRF constant (higher = less emphasis on top ranks)
+RRF_K = 60
+
+# Number of keyword results to consider before fusion
+BM25_TOP_K = 10
+
+# Number of vector results to consider before fusion
+VECTOR_TOP_K = 10
+
+# Final number of primary notes after RRF fusion
+RRF_FINAL_TOP_K = 3
+
+
+# ─── Confidence weighting ───────────────────────────────────────────────────
+
+# Boost factor for notes with confidence: confirmed (vs experimental)
+CONFIDENCE_BOOST = 1.2
+
+
+# ─── Temporal decay ─────────────────────────────────────────────────────────
+
+# Enable temporal decay (notes accessed recently rank higher)
+DECAY_ENABLED = True
+
+# Half-life in days: after this many days without retrieval, score is halved
+DECAY_HALF_LIFE_DAYS = 90
+
+# Minimum decay factor (notes never drop below this fraction of their score)
+DECAY_FLOOR = 0.3
+
+
+# ─── Smart truncation ───────────────────────────────────────────────────────
+
+# Maximum chars per individual code block in transcript (rest truncated)
+MAX_CODE_BLOCK_CHARS = 500
+
+# Minimum number of new turns to re-enqueue a grown session
+MIN_NEW_TURNS = 10

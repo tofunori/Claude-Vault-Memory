@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-vault_embed.py — Build/upsert local Qdrant index from vault notes.
+vault_embed.py — Build/upsert local Qdrant index from vault notes (v6).
 
 Usage:
   python3 vault_embed.py              → full rebuild (all notes)
   python3 vault_embed.py --note ID    → incremental upsert (single note)
   python3 vault_embed.py --notes A B  → incremental upsert (list of notes)
+
+v6: stores confidence + last_retrieved in Qdrant payload for decay/weighting.
 """
 
 import os
@@ -110,10 +112,12 @@ def parse_note(path: Path) -> dict | None:
     type_m = re.search(r'^type:\s*(.+)$', text, re.MULTILINE)
     title_m = re.search(r'^#\s+(.+)$', text, re.MULTILINE)
     created_m = re.search(r'^created:\s*(.+)$', text, re.MULTILINE)
+    confidence_m = re.search(r'^confidence:\s*(.+)$', text, re.MULTILINE)
 
     description = desc_m.group(1).strip() if desc_m else (title_m.group(1).strip() if title_m else path.stem)
     note_type = type_m.group(1).strip() if type_m else "concept"
     created = created_m.group(1).strip() if created_m else TODAY
+    confidence = confidence_m.group(1).strip() if confidence_m else "experimental"
 
     body = re.sub(r'^---.*?---\s*', '', text, flags=re.DOTALL).strip()
     embed_text = f"{description}\n\n{body}"[:4000]  # voyage-4-large handles long context
@@ -124,6 +128,7 @@ def parse_note(path: Path) -> dict | None:
         "description": description,
         "type": note_type,
         "created": created,
+        "confidence": confidence,
     }
 
 
@@ -205,6 +210,8 @@ def upsert_notes(note_ids: list[str] | None = None):
                     "description": n["description"],
                     "type": n["type"],
                     "created": n["created"],
+                    "confidence": n["confidence"],
+                    "last_retrieved": n["created"],  # Initialize to created date
                     "updated_at": TODAY,
                 }
             )
