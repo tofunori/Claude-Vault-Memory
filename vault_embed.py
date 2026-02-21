@@ -26,16 +26,19 @@ try:
         VOYAGE_EMBED_MODEL,
         EMBED_DIM,
         EMBED_BATCH_SIZE,
+        GRAPH_CACHE_PATH as _GRAPH_CACHE_PATH,
     )
     VAULT_NOTES_DIR = Path(_VAULT_NOTES_DIR)
     QDRANT_PATH = Path(_QDRANT_PATH)
     ENV_FILE = Path(_ENV_FILE)
     LOG_FILE = Path(_LOG_FILE)
+    GRAPH_CACHE_PATH = Path(_GRAPH_CACHE_PATH)
 except ImportError:
     VAULT_NOTES_DIR = Path.home() / "notes"
     QDRANT_PATH = Path.home() / ".claude/hooks/vault_qdrant"
     ENV_FILE = Path.home() / ".claude/hooks/.env"
     LOG_FILE = Path.home() / ".claude/hooks/auto_remember.log"
+    GRAPH_CACHE_PATH = Path.home() / ".claude/hooks/vault_graph_cache.json"
     VOYAGE_EMBED_MODEL = "voyage-4-large"
     EMBED_DIM = 1024
     EMBED_BATCH_SIZE = 128
@@ -145,6 +148,23 @@ def get_notes_to_embed(note_ids: list[str] | None = None) -> list[dict]:
     return notes
 
 
+def build_graph_index(notes: list[dict]) -> tuple[dict, dict]:
+    """Build outbound link index and backlink index from already-parsed notes."""
+    known_ids = {n["note_id"] for n in notes}
+    outbound: dict[str, list[str]] = {}
+    for n in notes:
+        links = re.findall(r'\[\[([^\]]+)\]\]', n["text"])
+        outbound[n["note_id"]] = list(dict.fromkeys(
+            l.strip() for l in links
+            if len(l.strip()) < 60 and ' ' not in l.strip() and l.strip() in known_ids
+        ))
+    backlinks: dict[str, list[str]] = {}
+    for src, targets in outbound.items():
+        for t in targets:
+            backlinks.setdefault(t, []).append(src)
+    return outbound, backlinks
+
+
 def upsert_notes(note_ids: list[str] | None = None):
     try:
         from qdrant_client.models import PointStruct
@@ -200,6 +220,22 @@ def upsert_notes(note_ids: list[str] | None = None):
     log(f"EMBED_INDEX upserted: {total} notes")
     if note_ids is None:
         print(f"EMBED_INDEX upserted: {total} notes → {QDRANT_PATH}")
+        # Rebuild graph cache from parsed notes (no extra I/O needed)
+        try:
+            import json
+            outbound, backlinks = build_graph_index(notes)
+            cache = {
+                "built_at": TODAY,
+                "note_count": len(notes),
+                "outbound": outbound,
+                "backlinks": backlinks,
+            }
+            GRAPH_CACHE_PATH.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+            edge_count = sum(len(v) for v in outbound.values())
+            log(f"EMBED graph cache: {len(outbound)} notes, {edge_count} edges")
+            print(f"EMBED graph cache: {len(outbound)} notes, {edge_count} edges → {GRAPH_CACHE_PATH}")
+        except Exception as e:
+            log(f"EMBED graph cache error: {e}")
 
 
 def main():

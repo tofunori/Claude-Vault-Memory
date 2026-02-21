@@ -22,18 +22,22 @@ try:
         RETRIEVE_TOP_K as TOP_K,
         MIN_QUERY_LENGTH,
         VOYAGE_EMBED_MODEL,
+        GRAPH_CACHE_PATH as _GRAPH_CACHE_PATH,
+        MAX_SECONDARY,
+        MAX_BACKLINKS_PER_NOTE,
+        BFS_DEPTH,
     )
     VAULT_NOTES_DIR = Path(VAULT_NOTES_DIR)
     QDRANT_PATH = Path(QDRANT_PATH)
     ENV_FILE = Path(ENV_FILE)
     LOG_FILE = Path(LOG_FILE)
+    GRAPH_CACHE_PATH = Path(_GRAPH_CACHE_PATH)
 except ImportError:
     print("ERROR: config.py not found. Copy config.example.py to config.py and edit paths.", file=sys.stderr)
     sys.exit(0)
 
 COLLECTION = "vault_notes"
 TODAY = date.today().isoformat()
-MAX_SECONDARY = 3  # Max connected notes via graph traversal
 
 
 def log(msg: str):
@@ -57,49 +61,115 @@ def load_env_file() -> dict:
     return env
 
 
-def parse_wiki_links(note_path: Path) -> list:
-    """Extract [[links]] from the ## Links section (resolvable slugs only)."""
+def load_graph_cache() -> tuple[dict, dict]:
+    """Load pre-computed graph indices. Returns ({}, {}) on failure (graceful degradation)."""
     try:
-        text = note_path.read_text(encoding="utf-8")
-        match = re.search(r'## (?:Links|Connexions)\s*(.*?)(?=\n##|\Z)', text, re.DOTALL)
-        if not match:
-            return []
-        section = match.group(1)
-        links = re.findall(r'\[\[([^\]]+)\]\]', section)
-        # Keep only resolvable slugs: no spaces AND < 60 chars
-        return [l.strip() for l in links if len(l.strip()) < 60 and ' ' not in l.strip()]
+        import json
+        data = json.loads(GRAPH_CACHE_PATH.read_text(encoding="utf-8"))
+        return data.get("outbound", {}), data.get("backlinks", {})
+    except Exception:
+        return {}, {}
+
+
+def collect_bfs_candidates(
+    primary_ids: list[str],
+    outbound: dict,
+    backlinks: dict,
+) -> list[str]:
+    """
+    Collect candidate connected notes via 2-level BFS + backlinks.
+    Round-robin across primaries for diversification.
+    Returns deduplicated list of candidate IDs (primaries excluded).
+    """
+    seen = set(primary_ids)
+    candidates: list[str] = []
+
+    def add(nid: str) -> bool:
+        if nid not in seen:
+            seen.add(nid)
+            candidates.append(nid)
+            return True
+        return False
+
+    # Backlinks of primary notes (injected first — structural relevance)
+    for pid in primary_ids:
+        for nid in backlinks.get(pid, [])[:MAX_BACKLINKS_PER_NOTE]:
+            add(nid)
+
+    # BFS depth 1: outbound links, round-robin across primaries
+    depth1_lists = [outbound.get(pid, []) for pid in primary_ids]
+    depth1_frontier: list[str] = []
+    for i in range(max((len(x) for x in depth1_lists), default=0)):
+        for links in depth1_lists:
+            if i < len(links) and add(links[i]):
+                depth1_frontier.append(links[i])
+
+    # BFS depth 2: outbound links of depth-1 nodes
+    depth2_lists = [outbound.get(nid, []) for nid in depth1_frontier]
+    for i in range(max((len(x) for x in depth2_lists), default=0)):
+        for links in depth2_lists:
+            if i < len(links):
+                add(links[i])
+
+    return candidates
+
+
+def score_candidates_qdrant(
+    candidate_ids: list[str],
+    query_emb: list,
+    qd,
+) -> list[dict]:
+    """Rank candidate notes by cosine similarity to query via Qdrant filter query."""
+    if not candidate_ids:
+        return []
+    try:
+        from qdrant_client.models import Filter, FieldCondition, MatchAny
+        f = Filter(must=[FieldCondition(key="note_id", match=MatchAny(any=candidate_ids))])
+        response = qd.query_points(
+            collection_name=COLLECTION,
+            query=query_emb,
+            query_filter=f,
+            limit=MAX_SECONDARY,
+        )
+        return [
+            {
+                "note_id": r.payload["note_id"],
+                "description": r.payload.get("description", r.payload["note_id"]),
+                "type": r.payload.get("type", "?"),
+                "score": r.score,
+            }
+            for r in response.points
+        ]
     except Exception:
         return []
 
 
-def get_connected_notes(primary_ids: list, max_secondary: int = MAX_SECONDARY) -> list:
-    """Returns connected notes (1 graph level) via wiki-links in ## Links section."""
-    seen = set(primary_ids)
-    connected = []
-    for note_id in primary_ids:
-        note_path = VAULT_NOTES_DIR / f"{note_id}.md"
+def pad_unscored(
+    scored_ids: set,
+    candidate_ids: list[str],
+    slots: int,
+) -> list[dict]:
+    """Fallback for candidates absent from Qdrant (new notes not yet indexed)."""
+    result = []
+    for nid in candidate_ids:
+        if nid in scored_ids or len(result) >= slots:
+            break
+        note_path = VAULT_NOTES_DIR / f"{nid}.md"
         if not note_path.exists():
             continue
-        links = parse_wiki_links(note_path)
-        for link_id in links:
-            if link_id in seen:
-                continue
-            linked_path = VAULT_NOTES_DIR / f"{link_id}.md"
-            if linked_path.exists():
-                seen.add(link_id)
-                text = linked_path.read_text(encoding="utf-8")[:400]
-                desc_m = re.search(r'^description:\s*(.+)$', text, re.MULTILINE)
-                type_m = re.search(r'^type:\s*(.+)$', text, re.MULTILINE)
-                connected.append({
-                    "note_id": link_id,
-                    "description": desc_m.group(1).strip() if desc_m else link_id,
-                    "type": type_m.group(1).strip() if type_m else "?",
-                })
-            if len(connected) >= max_secondary:
-                break
-        if len(connected) >= max_secondary:
-            break
-    return connected
+        try:
+            text = note_path.read_text(encoding="utf-8", errors="replace")[:400]
+            desc_m = re.search(r'^description:\s*(.+)$', text, re.MULTILINE)
+            type_m = re.search(r'^type:\s*(.+)$', text, re.MULTILINE)
+            result.append({
+                "note_id": nid,
+                "description": desc_m.group(1).strip() if desc_m else nid,
+                "type": type_m.group(1).strip() if type_m else "?",
+                "score": None,
+            })
+        except Exception:
+            pass
+    return result
 
 
 def main():
@@ -173,16 +243,25 @@ def main():
                 f"[[{p['note_id']}]] ({p.get('type', '?')}, {score_pct}%) — {p.get('description', '')}"
             )
 
-        # Graph traversal: connected notes via ## Links section
-        connected = get_connected_notes(primary_ids)
-        if connected:
+        # Graph traversal: BFS 2 levels + backlinks + Qdrant scoring
+        outbound, backlinks = load_graph_cache()
+        candidate_ids = collect_bfs_candidates(primary_ids, outbound, backlinks)
+        scored = score_candidates_qdrant(candidate_ids, query_emb, qd)
+        scored_ids = {s["note_id"] for s in scored}
+        remaining = MAX_SECONDARY - len(scored)
+        if remaining > 0:
+            scored.extend(pad_unscored(scored_ids, candidate_ids, remaining))
+
+        if scored:
             lines.append("\n=== Connected notes (graph) ===")
-            for c in connected:
-                lines.append(f"[[{c['note_id']}]] ({c['type']}) — {c['description']}")
+            for c in scored:
+                score_str = f", {int(c['score'] * 100)}%" if c.get("score") is not None else ""
+                lines.append(f"[[{c['note_id']}]] ({c['type']}{score_str}) — {c['description']}")
 
         print("\n".join(lines))
 
-        log(f"RETRIEVE query={len(query)}c → {len(results)} notes + {len(connected)} graph (threshold {SCORE_THRESHOLD})")
+        cache_status = "ok" if outbound else "miss"
+        log(f"RETRIEVE query={len(query)}c → {len(results)} primary + {len(scored)} graph [cache={cache_status}] (threshold {SCORE_THRESHOLD})")
 
     except Exception as e:
         log(f"RETRIEVE error: {e}")

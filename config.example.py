@@ -18,6 +18,9 @@ QUEUE_DIR = "/home/yourname/.claude/hooks/queue"
 # Log file
 LOG_FILE = "/home/yourname/.claude/hooks/auto_remember.log"
 
+# Graph cache (generated automatically by vault_embed.py on full rebuild)
+GRAPH_CACHE_PATH = "/home/yourname/.claude/hooks/vault_graph_cache.json"
+
 
 # ─── Embedding model ──────────────────────────────────────────────────────────
 
@@ -53,3 +56,14 @@ MIN_QUERY_LENGTH = 20
 
 # Minimum number of turns in a session to enqueue for extraction
 MIN_TURNS = 5
+
+# ─── Graph traversal ──────────────────────────────────────────────────────────
+
+# Maximum connected notes surfaced via BFS graph traversal
+MAX_SECONDARY = 5
+
+# Maximum backlinks injected per primary note (prevents MOC flooding)
+MAX_BACKLINKS_PER_NOTE = 3
+
+# BFS depth for graph traversal (2 = notes connected to connected notes)
+BFS_DEPTH = 2
