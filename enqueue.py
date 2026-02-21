@@ -21,6 +21,8 @@ except ImportError:
     LOG_FILE = Path.home() / ".claude/hooks/auto_remember.log"
     MIN_TURNS = 5
 
+MIN_NEW_TURNS = 10  # New turns required to re-process an already-processed session
+
 TODAY = date.today().isoformat()
 
 
@@ -68,8 +70,21 @@ def main():
 
         processed_path = QUEUE_DIR / "processed" / f"{session_id}.json"
         if processed_path.exists():
-            log(f"ENQUEUE SKIP (already processed) session={session_id[:8]}")
-            sys.exit(0)
+            # Check if the session has grown significantly since last processing
+            try:
+                processed_data = json.loads(processed_path.read_text(encoding="utf-8"))
+                processed_turns = processed_data.get("turn_count", 0)
+                new_turns = turn_count - processed_turns
+                if new_turns >= MIN_NEW_TURNS:
+                    processed_path.unlink()
+                    log(f"RE-ENQUEUE session={session_id[:8]} (grew {processed_turns}→{turn_count} turns, +{new_turns} new)")
+                    # Fall through to enqueue below
+                else:
+                    log(f"ENQUEUE SKIP (already processed, only +{new_turns} new turns) session={session_id[:8]}")
+                    sys.exit(0)
+            except Exception:
+                log(f"ENQUEUE SKIP (already processed) session={session_id[:8]}")
+                sys.exit(0)
 
         QUEUE_DIR.mkdir(parents=True, exist_ok=True)
         ticket = {

@@ -126,6 +126,8 @@ def upsert_note_async(note_id: str):
 
 
 def extract_conversation(jsonl_path: str, max_chars: int = 40000) -> tuple[str, int]:
+    """Extract the LAST turns that fit within max_chars.
+    For long sessions, this ensures Kimi sees recent work, not the session-start summary."""
     turns = []
     try:
         with open(jsonl_path) as f:
@@ -151,7 +153,23 @@ def extract_conversation(jsonl_path: str, max_chars: int = 40000) -> tuple[str, 
     except Exception as e:
         log(f"Error reading transcript: {e}")
 
-    return "\n\n".join(turns)[:max_chars], len(turns)
+    total_turns = len(turns)
+
+    # Take the LAST turns that fit within max_chars (not the first)
+    selected = []
+    total_chars = 0
+    for turn in reversed(turns):
+        turn_len = len(turn) + 2  # +2 for "\n\n"
+        if total_chars + turn_len > max_chars:
+            break
+        selected.append(turn)
+        total_chars += turn_len
+    selected.reverse()
+
+    if len(selected) < total_turns:
+        log(f"Conversation truncated: last {len(selected)}/{total_turns} turns ({total_chars} chars)")
+
+    return "\n\n".join(selected), total_turns
 
 
 def sanitize_note_id(note_id: str) -> str:
@@ -255,62 +273,65 @@ def extract_facts_with_llm(conversation: str, existing_notes: str) -> list:
 
     client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
 
-    prompt = f"""You are a personal memory agent for the owner of this knowledge vault.
+    # Strip Claude Code UI tags that confuse the extraction LLM
+    clean_conversation = re.sub(r'<system-reminder>.*?</system-reminder>', '', conversation, flags=re.DOTALL)
+    clean_conversation = re.sub(r'<local-command-caveat>.*?</local-command-caveat>', '', clean_conversation, flags=re.DOTALL)
+    clean_conversation = re.sub(r'<[a-z-]+>|</[a-z-]+>', '', clean_conversation)
+    clean_conversation = clean_conversation.strip()
 
-Extract 0-15 DURABLE atomic facts from this Claude Code session.
+    system_msg = "You are a JSON extraction bot. You output ONLY valid JSON arrays. Never output prose, reasoning, explanations, or conversational text. Your entire response must be parseable by json.loads(). If there is nothing to extract, output: []"
 
-STRICT RULES:
-- Capture everything durable: technical decisions, system configs, solutions to problems, discovered preferences, established workflows, insights about any project, learned facts, configured tools
-- Domain doesn't matter: thesis, NAS, scripts, courses, infrastructure, etc.
-- Ignore: temporary debugging without resolution, casual conversation, reformulations without new content, intermediate steps
-- Title = testable proposition ("X does Y" — not a generic label)
-- Maximum 15 notes. Zero if nothing truly durable.
+    user_msg = f"""Extract 0-15 durable atomic facts from this Claude Code session transcript.
+
+WHAT TO CAPTURE (any domain):
+- Technical decisions, system configs, solutions found, established workflows
+- Facts learned about tools, infrastructure, methods, courses, personal projects
+- Ignore: temporary debugging, small talk, reformulations, unresolved intermediate steps
 
 RELATION TYPES:
 - NEW: entirely new fact, absent from existing notes
 - UPDATES:<note_id>: replaces existing info (e.g. threshold changed, value corrected)
 - EXTENDS:<note_id>: adds detail without replacing (e.g. extra detail on existing method)
 
-Existing notes in the vault (format: "- note_id: description"):
+EXISTING VAULT NOTES (format: "- note_id: description"):
 {existing_notes}
 
-CRITICAL RULES FOR WIKI LINKS:
-1. In "## Links" and everywhere in the note body, links MUST use the note_id slug, NEVER the full title.
-   CORRECT: [[methodologie-pipeline]], [[brdf-correction-ren2021]]
-   FORBIDDEN: [[The Ren 2021 BRDF correction reduces albedo bias]], [[GEE Pipeline → DuckDB]]
-2. Every link target must exactly match a slug from the "Existing notes" list above (the part before the ':').
-3. Every NEW note MUST end with a "Topics:" section linking to at least one relevant topic map.
+WIKI LINK RULES:
+- Links MUST use kebab-case note_id slugs, NEVER full titles
+- Every link target must match a slug from the existing notes list
+- Every NEW note MUST end with a Topics: section linking to a relevant topic map
 
-RESPONSE FORMAT — JSON array only, no surrounding text:
+RESPONSE FORMAT — JSON array only, nothing else before or after:
 [
   {{
     "note_id": "kebab-case-slug-max-80-chars",
     "relation": "NEW",
-    "documentDate": "{TODAY}",
-    "eventDate": null,
-    "content": "---\\ndescription: [~150 chars, mechanism or scope]\\ntype: decision|result|method|concept|context|argument|module\\ncreated: {TODAY}\\nconfidence: experimental\\n---\\n\\n# Title as a proposition\\n\\nNote body...\\n\\n## Links\\n\\n- [[existing-note-slug]]\\n- [[another-existing-slug]]\\n\\n---\\n\\nTopics:\\n- [[relevant-topic-map]]"
+    "content": "---\\ndescription: one sentence\\ntype: decision\\ncreated: {TODAY}\\nconfidence: experimental\\n---\\n\\n# Title as proposition\\n\\nBody...\\n\\n## Links\\n\\n- [[existing-note-slug]]\\n\\n---\\n\\nTopics:\\n- [[relevant-topic-map]]"
   }}
 ]
 
-For EXTENDS, "content" is the text to append (not a full note).
-For UPDATES, "content" is the complete revised note.
+For EXTENDS: content is the additional text to append only (not a full note).
+For UPDATES: content is the complete revised note.
+If nothing memorable: []
 
-If zero memorable notes: []
-
-SESSION CONVERSATION:
-{conversation}"""
+SESSION TRANSCRIPT:
+{clean_conversation}"""
 
     raw = ""
     try:
         response = client.chat.completions.create(
             model=FIREWORKS_MODEL,
-            max_tokens=6000,
-            messages=[{"role": "user", "content": prompt}]
+            max_tokens=10000,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ]
         )
 
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r'^```(?:json)?\n?', '', raw)
         raw = re.sub(r'\n?```$', '', raw)
+        raw = _repair_json_newlines(raw)
 
         log(f"LLM response ({len(raw)} chars): {raw[:300]}")
         parsed = json.loads(raw)
@@ -322,6 +343,32 @@ SESSION CONVERSATION:
     except Exception as e:
         log(f"Fireworks API error: {e}")
         return []
+
+
+def _repair_json_newlines(raw: str) -> str:
+    """Fix literal newlines inside JSON strings (common LLM output issue)."""
+    result = []
+    in_string = False
+    escaped = False
+    for char in raw:
+        if escaped:
+            result.append(char)
+            escaped = False
+        elif char == '\\' and in_string:
+            result.append(char)
+            escaped = True
+        elif char == '"':
+            result.append(char)
+            in_string = not in_string
+        elif char == '\n' and in_string:
+            result.append('\\n')
+        elif char == '\r' and in_string:
+            result.append('\\r')
+        elif char == '\t' and in_string:
+            result.append('\\t')
+        else:
+            result.append(char)
+    return ''.join(result)
 
 
 def write_note(note_id: str, content: str, relation: str):
@@ -386,7 +433,7 @@ def process_ticket(ticket_path: Path):
 
     if not facts:
         log("No memorable facts extracted")
-        _archive(ticket_path, session_id)
+        _archive(ticket_path, session_id, turn_count)
         return
 
     log(f"Facts extracted: {len(facts)}")
@@ -431,15 +478,30 @@ def process_ticket(ticket_path: Path):
             log(f"Error writing {fact.get('note_id', '?')}: {e}")
 
     log(f"Notes written: {written}/{len(facts)}")
-    _archive(ticket_path, session_id)
+    _archive(ticket_path, session_id, turn_count)
 
 
-def _archive(ticket_path: Path, session_id: str):
+def _archive(ticket_path: Path, session_id: str, turn_count: int = 0):
     try:
         PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
         dest = PROCESSED_DIR / ticket_path.name
-        ticket_path.rename(dest)
-        log(f"ARCHIVED session={session_id[:8]}")
+        if ticket_path.exists():
+            # Update turn_count so future re-enqueue comparisons are accurate
+            if turn_count > 0:
+                try:
+                    data = json.loads(ticket_path.read_text(encoding="utf-8"))
+                    data["turn_count"] = turn_count
+                    data["processed_at"] = TODAY
+                    ticket_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
+            ticket_path.rename(dest)
+            log(f"ARCHIVED session={session_id[:8]}")
+        else:
+            # Ticket already gone — write directly to processed/
+            data = {"session_id": session_id, "turn_count": turn_count, "processed_at": TODAY}
+            dest.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            log(f"ARCHIVED (recreated) session={session_id[:8]}")
     except Exception as e:
         log(f"Archive error: {e}")
 
