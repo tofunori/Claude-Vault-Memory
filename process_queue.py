@@ -154,6 +154,67 @@ def extract_conversation(jsonl_path: str, max_chars: int = 40000) -> tuple[str, 
     return "\n\n".join(turns)[:max_chars], len(turns)
 
 
+def sanitize_note_id(note_id: str) -> str:
+    """Normalize a note_id to a valid kebab-case slug (max 80 chars)."""
+    import unicodedata
+    note_id = unicodedata.normalize('NFKD', note_id)
+    note_id = ''.join(c for c in note_id if not unicodedata.combining(c))
+    note_id = note_id.lower()
+    note_id = re.sub(r'[^a-z0-9\-]', '-', note_id)
+    note_id = re.sub(r'-+', '-', note_id)
+    note_id = note_id.strip('-')
+    if len(note_id) > 80:
+        note_id = note_id[:80].rstrip('-')
+    return note_id
+
+
+def build_title_to_id_map(notes_dir: Path) -> dict:
+    """Build a mapping from lowercase H1 title (and aliases) → note_id."""
+    mapping = {}
+    try:
+        for f in notes_dir.glob("*.md"):
+            if f.name.startswith(".") or f.name.startswith("._"):
+                continue
+            try:
+                text = f.read_text(encoding="utf-8")[:500]
+                title_m = re.search(r'^#\s+(.+)$', text, re.MULTILINE)
+                if title_m:
+                    mapping[title_m.group(1).strip().lower()] = f.stem
+                aliases_m = re.search(r'^aliases:\s*\[(.+)\]', text, re.MULTILINE)
+                if aliases_m:
+                    for alias in aliases_m.group(1).split(','):
+                        alias = alias.strip().strip('"').strip("'").lower()
+                        if alias:
+                            mapping[alias] = f.stem
+            except Exception:
+                pass
+    except Exception as e:
+        log(f"Error building title map: {e}")
+    return mapping
+
+
+def fix_wikilinks_in_content(content: str, title_to_id: dict, valid_ids: set) -> str:
+    """Replace [[Full Title]] links with [[note-id]] links in generated content.
+
+    - If the target is already a valid note_id → leave as-is.
+    - If the target matches a known title or alias → replace with the slug.
+    - If unresolvable → strip the link brackets (keeps the text, removes broken ref).
+    """
+    def replace_link(m):
+        target = m.group(1).strip()
+        display = m.group(2)
+        if target in valid_ids:
+            return m.group(0)
+        target_lower = target.lower()
+        if target_lower in title_to_id:
+            corrected = title_to_id[target_lower]
+            return f"[[{corrected}|{display}]]" if display else f"[[{corrected}]]"
+        # Unresolvable: keep display text or target text, drop brackets
+        return display if display else target
+
+    return re.compile(r'\[\[([^\]|]+)(?:\|([^\]]+))?\]\]').sub(replace_link, content)
+
+
 def get_existing_notes_summary(notes_dir: Path, limit: int = 80) -> str:
     lines = []
     try:
@@ -210,17 +271,24 @@ RELATION TYPES:
 - UPDATES:<note_id>: replaces existing info (e.g. threshold changed, value corrected)
 - EXTENDS:<note_id>: adds detail without replacing (e.g. extra detail on existing method)
 
-Existing notes in the vault:
+Existing notes in the vault (format: "- note_id: description"):
 {existing_notes}
+
+CRITICAL RULES FOR WIKI LINKS:
+1. In "## Links" and everywhere in the note body, links MUST use the note_id slug, NEVER the full title.
+   CORRECT: [[methodologie-pipeline]], [[brdf-correction-ren2021]]
+   FORBIDDEN: [[The Ren 2021 BRDF correction reduces albedo bias]], [[GEE Pipeline → DuckDB]]
+2. Every link target must exactly match a slug from the "Existing notes" list above (the part before the ':').
+3. Every NEW note MUST end with a "Topics:" section linking to at least one relevant topic map.
 
 RESPONSE FORMAT — JSON array only, no surrounding text:
 [
   {{
-    "note_id": "kebab-case-slug",
+    "note_id": "kebab-case-slug-max-80-chars",
     "relation": "NEW",
     "documentDate": "{TODAY}",
     "eventDate": null,
-    "content": "---\\ndescription: [~150 chars, mechanism or scope]\\ntype: decision|result|method|concept|context|argument|module\\ncreated: {TODAY}\\nconfidence: experimental\\n---\\n\\n# Title as a proposition\\n\\nNote body...\\n\\n## Links\\n\\n- [[related-note]]"
+    "content": "---\\ndescription: [~150 chars, mechanism or scope]\\ntype: decision|result|method|concept|context|argument|module\\ncreated: {TODAY}\\nconfidence: experimental\\n---\\n\\n# Title as a proposition\\n\\nNote body...\\n\\n## Links\\n\\n- [[existing-note-slug]]\\n- [[another-existing-slug]]\\n\\n---\\n\\nTopics:\\n- [[relevant-topic-map]]"
   }}
 ]
 
@@ -309,6 +377,11 @@ def process_ticket(ticket_path: Path):
     log(f"Conversation: {turn_count} turns, {len(conversation)} chars")
 
     existing_notes = get_existing_notes_summary(VAULT_NOTES_DIR)
+
+    # Pre-build maps for post-generation link correction
+    title_to_id = build_title_to_id_map(VAULT_NOTES_DIR)
+    valid_ids = {f.stem for f in VAULT_NOTES_DIR.glob("*.md") if not f.name.startswith("._")}
+
     facts = extract_facts_with_llm(conversation, existing_notes)
 
     if not facts:
@@ -326,6 +399,15 @@ def process_ticket(ticket_path: Path):
             if not note_id or not content:
                 log(f"Invalid fact ignored: {fact}")
                 continue
+
+            # Sanitize note_id to a valid kebab-case slug
+            note_id_clean = sanitize_note_id(note_id)
+            if note_id_clean != note_id:
+                log(f"note_id sanitized: '{note_id}' → '{note_id_clean}'")
+                note_id = note_id_clean
+
+            # Fix any title-style [[Full Title]] links to [[note-id]] slugs
+            content = fix_wikilinks_in_content(content, title_to_id, valid_ids)
 
             # Semantic dedup: only for NEW facts
             if relation == "NEW":

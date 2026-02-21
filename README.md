@@ -31,9 +31,11 @@ End of session  (safety net)
 Background worker  (launchd WatchPaths)
   process_queue.py
     parse session transcript
-    LLM extraction → 0-15 atomic facts
+    LLM extraction → 0-15 atomic facts  (v5: enforced slug links + Topics: section)
+    sanitize_note_id()  →  guarantee valid kebab-case filename
+    fix_wikilinks_in_content()  →  replace [[Full Title]] with [[note-id]] slugs
     semantic dedup via Qdrant (score > 0.85 → EXTENDS existing note)
-    write markdown notes
+    write markdown notes to notes/ directory
     incremental upsert into Qdrant
 ```
 
@@ -58,6 +60,7 @@ Background worker  (launchd WatchPaths)
 | v2 | Graph traversal — connected notes surfaced via `## Links` wiki-links |
 | v3 | Proactive memory — Claude writes notes mid-session via MCP, indexed immediately |
 | v4 | BFS 2-level graph traversal + backlinks + Qdrant scoring for connected notes |
+| v5 | Link integrity: `sanitize_note_id`, `fix_wikilinks_in_content`, enforced `Topics:` section |
 
 ---
 
