@@ -27,3 +27,4 @@ build/
 .AppleDouble
 .LSOverride
 ._*
+.venv/
