@@ -1,6 +1,7 @@
 # Legacy Local (Claude-only)
 
 Ce dossier contient l'ancien pipeline mémoire local (pré-NAS unifié).
+Nom historique dans cette archive: **Claude Vault Memory**.
 
 ## Contenu
 

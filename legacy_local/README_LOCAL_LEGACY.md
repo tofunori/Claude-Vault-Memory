@@ -1,4 +1,4 @@
-# Claude Vault Memory
+# Memo-Rize (Legacy Local Documentation)
 
 Persistent semantic memory system for **Claude Code, Codex, and OpenClaw**.
 
@@ -190,8 +190,8 @@ In NAS mode, memory is centralized and shared across all three agents.
 ### Setup
 
 ```bash
-git clone https://github.com/tofunori/Claude-Vault-Memory
-cd Claude-Vault-Memory
+git clone <your-repo-url>
+cd <repo-dir>
 
 # Copy and edit config
 cp config.example.py config.py
@@ -227,7 +227,7 @@ Add to `~/.claude/settings.json`:
       "hooks": [
         {
           "type": "command",
-          "command": "python3 /path/to/Claude-Vault-Memory/vault_retrieve.py"
+          "command": "python3 /path/to/<repo-dir>/vault_retrieve.py"
         }
       ]
     }
@@ -237,7 +237,7 @@ Add to `~/.claude/settings.json`:
       "hooks": [
         {
           "type": "command",
-          "command": "python3 /path/to/Claude-Vault-Memory/enqueue.py"
+          "command": "python3 /path/to/<repo-dir>/enqueue.py"
         }
       ]
     }

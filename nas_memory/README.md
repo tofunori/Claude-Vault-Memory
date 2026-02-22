@@ -1,4 +1,4 @@
-# NAS Memory V1.2
+# Memo-Rize Runtime (Hosted) V1.2
 
 API + worker NAS-hosted for shared memory across Claude Code, Codex, and OpenClaw.
 

@@ -1,6 +1,6 @@
-# Claude Vault Memory
+# Memo-Rize: A Computational Memory Layer for Multi-Agent Systems
 
-Mémoire unifiée NAS pour **Claude Code + Codex + OpenClaw**.
+Unified computational memory layer for **Claude Code, Codex, and OpenClaw**.
 
 Ce repo a été réorganisé pour séparer clairement:
 
@@ -69,7 +69,7 @@ Ce dossier n'est plus le chemin recommandé pour la prod NAS.
 ```bash
 cd /volume1/Services
 
-git clone https://github.com/tofunori/Claude-Vault-Memory.git memory
+git clone <your-repo-url> memory
 cd memory
 
 python3 -m venv .venv
