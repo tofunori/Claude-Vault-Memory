@@ -93,6 +93,13 @@ def _coerce_path(value: str | Path | None, fallback: Path) -> Path:
     return Path(value)
 
 
+def _resolve_script(repo_root: Path, canonical_rel: str, legacy_rel: str) -> Path:
+    canonical = repo_root / canonical_rel
+    if canonical.exists():
+        return canonical
+    return repo_root / legacy_rel
+
+
 def _search_mode(core_config) -> str:
     bm25_enabled = bool(getattr(core_config, "BM25_ENABLED", True)) if core_config else True
     rerank_enabled = bool(getattr(core_config, "RERANK_ENABLED", True)) if core_config else True
@@ -156,7 +163,7 @@ def load_settings() -> Settings:
     relation_llm_timeout = int(os.environ.get("MEMORY_RELATION_LLM_TIMEOUT", "10"))
 
     fallback_notes = memory_root / "notes"
-    fallback_qdrant = memory_root / "qdrant"
+    fallback_qdrant = memory_root / "vault_qdrant"
     fallback_bm25 = memory_root / "vault_bm25_index.json"
     fallback_graph = memory_root / "vault_graph_cache.json"
     fallback_queue = memory_root / "queue"
@@ -168,6 +175,22 @@ def load_settings() -> Settings:
     queue_dir = _coerce_path(getattr(core, "QUEUE_DIR", None), fallback_queue)
 
     queue_dir.mkdir(parents=True, exist_ok=True)
+
+    vault_retrieve_script = _resolve_script(
+        repo_root,
+        canonical_rel="nas_memory/core/vault_retrieve.py",
+        legacy_rel="vault_retrieve.py",
+    )
+    process_queue_script = _resolve_script(
+        repo_root,
+        canonical_rel="nas_memory/core/process_queue.py",
+        legacy_rel="process_queue.py",
+    )
+    vault_embed_script = _resolve_script(
+        repo_root,
+        canonical_rel="nas_memory/core/vault_embed.py",
+        legacy_rel="vault_embed.py",
+    )
 
     return Settings(
         repo_root=repo_root,
@@ -192,9 +215,9 @@ def load_settings() -> Settings:
         bm25_index_path=bm25_index_path,
         graph_cache_path=graph_cache_path,
         queue_dir=queue_dir,
-        vault_retrieve_script=repo_root / "nas_memory" / "core" / "vault_retrieve.py",
-        process_queue_script=repo_root / "nas_memory" / "core" / "process_queue.py",
-        vault_embed_script=repo_root / "nas_memory" / "core" / "vault_embed.py",
+        vault_retrieve_script=vault_retrieve_script,
+        process_queue_script=process_queue_script,
+        vault_embed_script=vault_embed_script,
         search_mode=_search_mode(core),
         core_config_loaded=core is not None,
         live_extract_script=repo_root / "nas_memory" / "live_extract.py",

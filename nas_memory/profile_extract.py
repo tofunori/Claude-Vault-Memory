@@ -12,6 +12,16 @@ DEFAULT_MODEL = os.environ.get("MEMORY_PROFILE_EXTRACT_MODEL", "claude-sonnet-4-
 ALLOWED_TYPES = {"decision", "preference", "constraint", "fact"}
 
 
+def _as_bool(name: str, default: bool = True) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+USE_CLAUDE = _as_bool("MEMORY_USE_CLAUDE_PROFILE_EXTRACT", True)
+
+
 def _repair_json(raw: str) -> str:
     out = []
     in_str = False
@@ -48,8 +58,12 @@ def _call_claude(prompt: str, timeout_s: int) -> str:
         env=env,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"claude -p exit {result.returncode}: {result.stderr[:200]}")
-    return result.stdout.strip()
+        details = (result.stderr or "").strip() or (result.stdout or "").strip()
+        raise RuntimeError(f"claude -p exit {result.returncode}: {details[:240]}")
+    text = (result.stdout or "").strip()
+    if not text:
+        raise RuntimeError("claude -p empty response")
+    return text
 
 
 def _normalize_item(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -196,18 +210,21 @@ def main() -> int:
     timeout_s = int(payload.get("timeout_s", 12))
     prompt = _build_prompt(payload, max_items=max_items)
 
-    try:
-        raw = _call_claude(prompt, timeout_s=timeout_s)
-        raw = re.sub(r"^```(?:json)?\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
-        raw = _repair_json(raw)
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            parsed = {"static": [], "dynamic": []}
-        result = _normalize_payload(parsed, max_items=max_items)
-    except Exception as exc:
+    if USE_CLAUDE:
+        try:
+            raw = _call_claude(prompt, timeout_s=timeout_s)
+            raw = re.sub(r"^```(?:json)?\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+            raw = _repair_json(raw)
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                parsed = {"static": [], "dynamic": []}
+            result = _normalize_payload(parsed, max_items=max_items)
+        except Exception as exc:
+            result = _fallback_extract(payload, max_items=max_items)
+            result["error"] = str(exc)
+    else:
         result = _fallback_extract(payload, max_items=max_items)
-        result["error"] = str(exc)
 
     sys.stdout.write(json.dumps(result, ensure_ascii=False))
     return 0
@@ -215,4 +232,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
